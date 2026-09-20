@@ -4,7 +4,8 @@ from mcp.server.fastmcp import FastMCP
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-load_dotenv()
+# Load latest tokens directly from .env
+load_dotenv(override=True)
 
 port = int(os.environ.get("PORT", 8000))
 host = os.environ.get("HOST", "0.0.0.0")
