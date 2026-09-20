@@ -76,5 +76,6 @@ def top_videos(start_date: str, end_date: str) -> dict:
                  start=start_date, end=end_date, sort="-views")
 
 if __name__ == "__main__":
-    # Uses streamable-http which is fully supported by Claude custom connectors
-    mcp.run(transport="streamable-http")
+    import sys
+    transport = "streamable-http" if "--http" in sys.argv else os.environ.get("TRANSPORT", "stdio")
+    mcp.run(transport=transport)
