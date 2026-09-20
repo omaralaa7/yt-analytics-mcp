@@ -96,10 +96,11 @@ def traffic_sources(video_id: str) -> dict:
                  filters=f"video=={video_id}", sort="-views")
 
 @mcp.tool()
-def search_terms(video_id: str) -> dict:
+def search_terms(video_id: str, max_results: int = 25) -> dict:
     """The YouTube search queries that led viewers to this video."""
     return query("views", dimensions="insightTrafficSourceDetail",
-                 filters=f"video=={video_id}", sort="-views")
+                 filters=f"video=={video_id};insightTrafficSourceType==YT_SEARCH",
+                 sort="-views", max_results=max_results)
 
 @mcp.tool()
 def retention(video_id: str) -> dict:
