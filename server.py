@@ -26,12 +26,13 @@ def api():
     return build("youtubeAnalytics", "v2", credentials=creds)
 
 def query(metrics, dimensions=None, filters=None, sort=None,
-          start="2020-01-01", end="2035-01-01"):
+          start="2020-01-01", end="2035-01-01", max_results=None):
     kwargs = dict(ids="channel==MINE", startDate=start, endDate=end,
                   metrics=metrics)
     if dimensions: kwargs["dimensions"] = dimensions
     if filters:    kwargs["filters"] = filters
     if sort:       kwargs["sort"] = sort
+    if max_results: kwargs["maxResults"] = max_results
     r = api().reports().query(**kwargs).execute()
     headers = [h["name"] for h in r.get("columnHeaders", [])]
     return {"headers": headers, "rows": r.get("rows", [])}
@@ -64,16 +65,23 @@ def retention(video_id: str) -> dict:
                  filters=f"video=={video_id}", sort="elapsedVideoTimeRatio")
 
 @mcp.tool()
-def channel_totals(start_date: str, end_date: str) -> dict:
+def channel_totals(start_date: str = "2020-01-01", end_date: str = "2035-01-01") -> dict:
     """Channel-wide totals between two dates in YYYY-MM-DD format (views, watch time, subscribers gained)."""
     return query("views,estimatedMinutesWatched,subscribersGained",
                  start=start_date, end=end_date)
 
 @mcp.tool()
-def top_videos(start_date: str, end_date: str) -> dict:
-    """Best performing videos in a date range (YYYY-MM-DD) sorted by views."""
-    return query("views,averageViewPercentage", dimensions="video",
-                 start=start_date, end=end_date, sort="-views")
+def top_videos(start_date: str = "2020-01-01", end_date: str = "2035-01-01", max_results: int = 200) -> dict:
+    """Best performing videos in a date range (YYYY-MM-DD) sorted by views. Returns video IDs, views, watch time, and averageViewPercentage."""
+    return query("views,estimatedMinutesWatched,averageViewPercentage,likes,subscribersGained",
+                 dimensions="video",
+                 start=start_date, end=end_date, sort="-views", max_results=max_results)
+
+@mcp.tool()
+def list_channel_videos(max_results: int = 200) -> dict:
+    """List all videos/shorts in the channel with their video IDs and performance metrics."""
+    return query("views,estimatedMinutesWatched,averageViewPercentage,likes,subscribersGained",
+                 dimensions="video", sort="-views", max_results=max_results)
 
 if __name__ == "__main__":
     import sys
