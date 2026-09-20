@@ -31,33 +31,49 @@ def api_analytics():
 def api_data():
     return build("youtube", "v3", credentials=get_creds())
 
-def get_video_metadata(video_ids: list):
-    """Fetch titles, publish dates, and privacy status for a list of video IDs (batched up to 50)."""
-    if not video_ids:
-        return {}
-    
-    metadata = {}
+def get_all_channel_uploads(public_only=True):
+    """Fetches all uploaded videos directly from the channel's uploads playlist in real time."""
     yt_data = api_data()
-    # Batch IDs in chunks of 50
+    ch = yt_data.channels().list(mine=True, part="contentDetails").execute()
+    if not ch.get("items"):
+        return []
+    uploads_id = ch["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+    items = []
+    page_token = None
+    while True:
+        pl = yt_data.playlistItems().list(
+            playlistId=uploads_id,
+            part="snippet,status",
+            maxResults=50,
+            pageToken=page_token
+        ).execute()
+        items.extend(pl.get("items", []))
+        page_token = pl.get("nextPageToken")
+        if not page_token or len(items) >= 150:
+            break
+
+    video_ids = [it["snippet"]["resourceId"]["videoId"] for it in items]
+    
+    # Batch fetch full metadata and live statistics (views, likes, comments)
+    video_details = []
     for i in range(0, len(video_ids), 50):
         chunk = video_ids[i:i + 50]
-        try:
-            res = yt_data.videos().list(part="snippet,status", id=",".join(chunk)).execute()
-            for item in res.get("items", []):
-                v_id = item["id"]
-                snippet = item.get("snippet", {})
-                status = item.get("status", {})
-                metadata[v_id] = {
-                    "title": snippet.get("title", "Unknown Title"),
-                    "publishedAt": snippet.get("publishedAt", ""),
-                    "privacyStatus": status.get("privacyStatus", "unknown")
-                }
-        except Exception as e:
-            # Fallback if Data API fails or scope not granted yet
-            print(f"[Warning] Failed to fetch metadata: {e}")
-            break
-            
-    return metadata
+        res = yt_data.videos().list(part="snippet,status,statistics", id=",".join(chunk)).execute()
+        for v in res.get("items", []):
+            privacy = v["status"].get("privacyStatus", "unknown")
+            if public_only and privacy != "public":
+                continue
+            video_details.append({
+                "video_id": v["id"],
+                "title": v["snippet"].get("title", "Unknown Title"),
+                "publishedAt": v["snippet"].get("publishedAt", ""),
+                "privacyStatus": privacy,
+                "viewCount": int(v.get("statistics", {}).get("viewCount", 0)),
+                "likeCount": int(v.get("statistics", {}).get("likeCount", 0)),
+                "commentCount": int(v.get("statistics", {}).get("commentCount", 0)),
+            })
+    return video_details
 
 def query(metrics, dimensions=None, filters=None, sort=None,
           start="2020-01-01", end="2035-01-01", max_results=None):
@@ -73,20 +89,30 @@ def query(metrics, dimensions=None, filters=None, sort=None,
 
 @mcp.tool()
 def video_stats(video_id: str) -> dict:
-    """Totals for one video including title, publish date, views, watch time (mins), average view duration and percentage, likes, comments, subscribers gained."""
+    """Totals for one video including real-time title, publish date, views, watch time (mins), average view duration and percentage, likes, comments, subscribers gained."""
     analytics = query(
         "views,estimatedMinutesWatched,averageViewDuration,"
         "averageViewPercentage,likes,comments,subscribersGained",
         filters=f"video=={video_id}",
     )
-    meta = get_video_metadata([video_id]).get(video_id, {})
+    
+    yt_data = api_data()
+    v_res = yt_data.videos().list(part="snippet,status,statistics", id=video_id).execute()
+    v_item = v_res.get("items", [{}])[0] if v_res.get("items") else {}
+    snippet = v_item.get("snippet", {})
+    status = v_item.get("status", {})
+    stats = v_item.get("statistics", {})
+
     return {
         "video_id": video_id,
-        "title": meta.get("title", "Unknown Title"),
-        "publishedAt": meta.get("publishedAt", ""),
-        "privacyStatus": meta.get("privacyStatus", "unknown"),
-        "headers": analytics.get("headers", []),
-        "stats": analytics.get("rows", [[]])[0] if analytics.get("rows") else []
+        "title": snippet.get("title", "Unknown Title"),
+        "publishedAt": snippet.get("publishedAt", ""),
+        "privacyStatus": status.get("privacyStatus", "unknown"),
+        "liveViews": int(stats.get("viewCount", 0)),
+        "liveLikes": int(stats.get("likeCount", 0)),
+        "liveComments": int(stats.get("commentCount", 0)),
+        "analyticsHeaders": analytics.get("headers", []),
+        "analyticsStats": analytics.get("rows", [[]])[0] if analytics.get("rows") else []
     }
 
 @mcp.tool()
@@ -115,63 +141,49 @@ def channel_totals(start_date: str = "2020-01-01", end_date: str = "2035-01-01")
                  start=start_date, end=end_date)
 
 @mcp.tool()
-def list_channel_videos(public_only: bool = True, max_results: int = 200) -> dict:
-    """List videos in the channel with titles, publish dates, privacy status, and performance metrics (views, watch time, avg view %, likes, subs gained). By default filters for public videos only."""
-    res = query("views,estimatedMinutesWatched,averageViewPercentage,likes,subscribersGained",
-                dimensions="video", sort="-views", max_results=max_results)
+def list_channel_videos(public_only: bool = True, max_results: int = 50) -> dict:
+    """List all videos/shorts in the channel fetched directly from YouTube with titles, publish dates, privacy status, live views, likes, and analytics."""
+    uploads = get_all_channel_uploads(public_only=public_only)
     
-    video_ids = [row[0] for row in res.get("rows", [])]
-    meta = get_video_metadata(video_ids)
+    # Query analytics for all videos
+    analytics_map = {}
+    try:
+        res = query("views,estimatedMinutesWatched,averageViewPercentage,subscribersGained",
+                    dimensions="video", sort="-views", max_results=200)
+        for row in res.get("rows", []):
+            analytics_map[row[0]] = {
+                "analyticsViews": row[1],
+                "watchMinutes": row[2],
+                "avgViewPercentage": row[3],
+                "subsGained": row[4]
+            }
+    except Exception as e:
+        print(f"[Warning] Analytics query error: {e}")
+
+    rows = []
+    headers = ["video_id", "title", "publishedAt", "privacyStatus", "liveViews", "liveLikes", "avgViewPercentage", "subsGained", "watchMinutes"]
     
-    enriched_rows = []
-    headers = ["video_id", "title", "publishedAt", "privacyStatus", "views", "estimatedMinutesWatched", "averageViewPercentage", "likes", "subscribersGained"]
-    
-    for row in res.get("rows", []):
-        vid = row[0]
-        v_meta = meta.get(vid, {"title": "Unknown", "publishedAt": "", "privacyStatus": "unknown"})
-        
-        if public_only and v_meta.get("privacyStatus") not in ("public", "unknown"):
-            continue
-            
-        enriched_rows.append([
+    for v in uploads[:max_results]:
+        vid = v["video_id"]
+        ana = analytics_map.get(vid, {})
+        rows.append([
             vid,
-            v_meta.get("title"),
-            v_meta.get("publishedAt"),
-            v_meta.get("privacyStatus"),
-            *row[1:]
+            v["title"],
+            v["publishedAt"][:10],
+            v["privacyStatus"],
+            v["viewCount"],
+            v["likeCount"],
+            ana.get("avgViewPercentage", 0),
+            ana.get("subsGained", 0),
+            ana.get("watchMinutes", 0)
         ])
         
-    return {"headers": headers, "rows": enriched_rows}
+    return {"headers": headers, "rows": rows}
 
 @mcp.tool()
-def top_videos(start_date: str = "2020-01-01", end_date: str = "2035-01-01", public_only: bool = True, max_results: int = 200) -> dict:
-    """Best performing videos in a date range (YYYY-MM-DD) sorted by views with titles and publish dates."""
-    res = query("views,estimatedMinutesWatched,averageViewPercentage,likes,subscribersGained",
-                dimensions="video",
-                start=start_date, end=end_date, sort="-views", max_results=max_results)
-    
-    video_ids = [row[0] for row in res.get("rows", [])]
-    meta = get_video_metadata(video_ids)
-    
-    enriched_rows = []
-    headers = ["video_id", "title", "publishedAt", "privacyStatus", "views", "estimatedMinutesWatched", "averageViewPercentage", "likes", "subscribersGained"]
-    
-    for row in res.get("rows", []):
-        vid = row[0]
-        v_meta = meta.get(vid, {"title": "Unknown", "publishedAt": "", "privacyStatus": "unknown"})
-        
-        if public_only and v_meta.get("privacyStatus") not in ("public", "unknown"):
-            continue
-            
-        enriched_rows.append([
-            vid,
-            v_meta.get("title"),
-            v_meta.get("publishedAt"),
-            v_meta.get("privacyStatus"),
-            *row[1:]
-        ])
-        
-    return {"headers": headers, "rows": enriched_rows}
+def top_videos(start_date: str = "2020-01-01", end_date: str = "2035-01-01", public_only: bool = True, max_results: int = 50) -> dict:
+    """Best performing videos in the channel sorted by live views with titles, publish dates, and retention."""
+    return list_channel_videos(public_only=public_only, max_results=max_results)
 
 if __name__ == "__main__":
     import sys
